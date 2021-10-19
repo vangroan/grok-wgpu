@@ -1,8 +1,74 @@
+use wgpu::util::DeviceExt;
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
     window::{Window, WindowBuilder},
 };
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex {
+    position: [f32; 3],
+    color: [f32; 3],
+}
+
+impl Vertex {
+    fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
+        wgpu::VertexBufferLayout {
+            // The `array_stride` defines how wide a vertex is. When the shader
+            // goes to read the next vertex, it will skip over `array_stride`
+            // number of bytes. In our case, `array_stride` will probably be 24 bytes.
+            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            // Tells the pipeline how often it should move to the next vertex.
+            step_mode: wgpu::VertexStepMode::Vertex,
+            // Vertex attributes describe the individual parts of the vertex.
+            // Generally this is a 1:1 mapping with a struct's fields, which
+            // it is in our case.
+            attributes: &[
+                wgpu::VertexAttribute {
+                    // Defines the offset in bytes that this attribute starts.
+                    // The first attribute is usually zero, and any future
+                    // attributes are the collective size_of the previous
+                    // attributes data.
+                    offset: 0,
+                    // Tells the shader what location to store this attribute at.
+                    // For example `[[location(0)]] x: vec3<f32>` in the vertex
+                    // shader would correspond to the position field of the struct,
+                    // while `[[location(1)]] x: vec3<f32>` would be the color field.
+                    shader_location: 0,
+                    // Format tells the shader the shape of the attribute.
+                    // `Float32x3` corresponds to vec3<f32> in shader code.
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+            ],
+        }
+    }
+}
+
+// Triangle
+#[rustfmt::skip]
+const VERTICES: &[Vertex] = &[
+    Vertex { position: [-0.0868241,   0.49240386, 0.0], color: [0.5, 0.0, 0.5] }, // A
+    Vertex { position: [-0.49513406,  0.06958647, 0.0], color: [0.5, 0.0, 0.5] }, // B
+    Vertex { position: [-0.21918549, -0.44939706, 0.0], color: [0.5, 0.0, 0.5] }, // C
+    Vertex { position: [ 0.35966998, -0.3473291,  0.0], color: [0.5, 0.0, 0.5] }, // D
+    Vertex { position: [ 0.44147372,  0.2347359,  0.0], color: [0.5, 0.0, 0.5] }, // E
+];
+
+#[rustfmt::skip]
+const INDICES: &[u16] = &[
+    0, 1, 4,
+    1, 2, 4,
+    2, 3, 4,
+    // IMPORTANT: We add 2 bytes padding as wgpu requires buffers to be aligned to 4 bytes.
+    /* padding */
+    0,
+];
 
 struct State {
     surface: wgpu::Surface,
@@ -11,6 +77,9 @@ struct State {
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    num_indices: u32,
 }
 
 impl State {
@@ -118,9 +187,9 @@ impl State {
                 // in the shader module.
                 entry_point: "main",
                 // Tells wgpu what type of vertices we want to pass to
-                // the vertex shader. We're specifying the vertices in
-                // the vertex shader itself so we'll leave this empty.
-                buffers: &[],
+                // the vertex shader. If the vertices are generated in
+                // the shader, then this can be left empty.
+                buffers: &[Vertex::layout()],
             },
             // Fragment shader is optional. We need it because we're storing
             // color data to the surface.
@@ -163,6 +232,21 @@ impl State {
             },
         });
 
+        // `create_buffer_init` requires the DeviceExt extension trait.
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: bytemuck::cast_slice(VERTICES),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Index Buffer"),
+            contents: bytemuck::cast_slice(INDICES),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let num_indices = INDICES.len() as u32;
+
         State {
             surface,
             device,
@@ -170,6 +254,9 @@ impl State {
             config,
             size,
             render_pipeline,
+            vertex_buffer,
+            index_buffer,
+            num_indices,
         }
     }
 
@@ -251,9 +338,18 @@ impl State {
 
             render_pass.set_pipeline(&self.render_pipeline);
 
-            // We tell wgpu to draw something with 3 vertices, and 1 instance.
+            // Vertex buffer must be set, otherwise program will crash.
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            // The method name is `set_index_buffer` not `set_index_buffers`.
+            // We can only have one index buffer set at a time.
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+
             // This is where [[builtin(vertex_index)]] comes from.
-            render_pass.draw(0..3, 0..1);
+            // render_pass.draw(0..self.num_vertices, 0..1);
+
+            // When using an index buffer, you need to use draw_indexed.
+            // The draw method ignores the index buffer.
+            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
         }
 
         // submit will accept anything that implements IntoIter
